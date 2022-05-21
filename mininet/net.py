@@ -87,13 +87,14 @@ method may be called to shut down the network.
 """
 
 import os
+os.environ['TZ'] = 'Asia/Shanghai'
 import re
 import select
 import signal
 import random
 
 from sys import exit  # pylint: disable=redefined-builtin
-from time import sleep
+from time import sleep, localtime, strftime
 from itertools import chain, groupby
 from math import ceil
 
@@ -107,7 +108,7 @@ from mininet.util import ( quietRun, fixLimits, numCores, ensureRoot,
                            macColonHex, ipStr, ipParse, netParse, ipAdd,
                            waitListening, BaseString )
 from mininet.term import cleanUpScreens, makeTerms
-
+from mininet.custom import *
 # Mininet version: should be consistent with README and LICENSE
 VERSION = "2.3.0"
 
@@ -324,7 +325,164 @@ class Mininet( object ):
                 if host.inNamespace:
                     host.setDefaultRoute( 'via %s' % natIP )
         return nat
+    
 
+    def iperf_errorSimEX(self, csv_output=False):
+
+        print "iperf_errorSimEX start"
+        assert len(self.hosts) >= 2
+        
+        status_list =  [NORMAL, DISK_ERROR, NETWORK_ERROR, SERVER_ERROR, BW_ERROR,CONCURRENCY_ERROR]
+
+        server = self.hosts[0]
+        client = self.hosts[1]
+        save_dir = '/home/mininet/log/Example_log'
+        iperfHeader = 'iperf -u '
+
+        if csv_output:
+            save_dir = save_dir + '_csv'
+            iperfHeader = iperfHeader + ' --reportstyle C '
+ 
+        if not os.path.exists(save_dir):
+            os.mkdir(save_dir)
+
+        print '-- CSV_FORMAT --' if csv_output  else '-- STD_FORMAT --'
+        for status in status_list:
+            status_str = translate_status(status)
+            server_logfile_name = os.path.join(save_dir, status_str+'_server.log')
+            client_logfile_name = os.path.join(save_dir, status_str+'_client.log')
+  
+            print status_str
+            server.cmd( 
+                        iperfHeader + '-s -i 1  '  +  statusInfo_dict[status].formServerCmd() +
+                        ' > ' + server_logfile_name + ' &')
+            client.cmd( 
+                        iperfHeader + ' -c ' + server.IP() + statusInfo_dict[status].formClientCmd() +
+                        ' > ' + client_logfile_name )
+            # stop server thread
+            server.cmd( 'killall -9 iperf' )
+
+        print "iperf_errorSimEX end"
+
+    def iperf_errorSim(self, status_size):
+        def init_status_list(list_size):
+            status_list = []
+            for i in range(list_size):
+                status_list.append(self.random_pick(
+                    [NORMAL, DISK_ERROR, NETWORK_ERROR, SERVER_ERROR, BW_ERROR,CONCURRENCY_ERROR],
+                    [0.7,0.06,0.06,0.06,0.06,0.06]))
+            return status_list
+        print "iperf_errorSim start"
+        assert len(self.hosts) >= 2
+        
+
+        status_list = init_status_list(status_size)
+
+        server = self.hosts[0]
+        client = self.hosts[1]
+
+        save_dir = '/home/mininet/log/'+ strftime("%m_%d_%H_%M_%S", localtime())
+        if not os.path.exists(save_dir):
+            os.mkdir(save_dir)
+        server_logfile_name = os.path.join(save_dir, 'server.log')
+        client_logfile_name = os.path.join(save_dir, 'client.log')
+        tagfile_name = os.path.join(save_dir, 'tag.log')
+        iperfHeader = 'iperf -u '
+        # START SERVER
+        output( 'Iperf_errorSim: iperf between %s and %s\n' % ( client.name, server.name ))
+        server.cmd( 
+            iperfHeader + '-s -i 1' + 
+            ' > ' + server_logfile_name + ' &')
+        f_tag = open(tagfile_name,'a+')
+        f_log = open(server_logfile_name, 'r')
+        for status in status_list:
+            status_str = translate_status(status)
+            f_tag.write(status_str)
+            f_tag.write('\n')
+            print status_str
+            client.cmd( iperfHeader + ' -c ' + server.IP() + statusInfo_dict[status].formClientCmd() +' > ' + client_logfile_name )
+            f_log.seek(0, 2)
+            f_tag.write(str(f_log.tell()))
+            f_tag.write('\n')
+        f_tag.close()
+        f_log.close()
+        server.stop()
+        print "iperf_errorSim end"
+
+    def iperf_single(self,hosts=None, udpBw='10M', period=60, port=5001, save_dir=None):
+        """Run iperf between two hosts using UDP.
+            hosts: [client, server]
+            returns: results two-element array of server and client speeds"""
+
+        assert (hosts is not None) and (len(hosts) == 2)
+        client, server = hosts
+
+        server_logfile_name = 'server_' + server.name + '.log'
+        client_logfile_name = 'client_' + client.name + '.log'
+
+        if save_dir is None:
+            save_dir = '/home/mininet/log/'+ strftime("%m_%d_%H_%M_%S", localtime())
+            if not os.path.exists(save_dir):
+                os.mkdir(save_dir)
+        server_logfile_name = os.path.join(save_dir, server_logfile_name)
+        client_logfile_name = os.path.join(save_dir, client_logfile_name)
+        output( 'Iperf_single: iperf between %s and %s\n' % ( client.name, server.name ))
+        #output( 'BW: %s, Port: %s, Period: %s\n' % (udpBw, port, period))
+        iperfArgs = 'iperf -u '
+        bwArgs = '-b ' + udpBw + ' '
+        portArgs = '-p' + str(port) + ' '
+        while True: #server may be busy
+            try :
+                server.cmd( 
+                    iperfArgs + '-s -i 1' + portArgs
+                    + ' > ' + server_logfile_name + '&')
+                break
+            except:
+                pass
+        for i in range(0, 10):
+            
+            print "***start client %s" % (client.name)
+            client.cmd(
+                iperfArgs + '-t '+ str(period/10) + '-P 10'+' -c ' + server.IP() + ' ' + bwArgs + portArgs +'&')
+
+    def iperfMulti(self, bw, period=60):
+        base_port = 5001
+        server_list = []
+        client_list = [h for h in self.hosts]
+        host_list = []
+        host_list = [h for h in self.hosts]
+    
+        cli_outs = []
+        ser_outs = []
+        import threading
+        threads = []
+        _len = len(host_list)
+        # select first host as server, others as clients
+        server = host_list[0]
+        for i in xrange(1, _len):
+            client = host_list[i]
+            thread = threading.Thread(target=self.iperf_single, args=([client, server], bw, period, base_port))
+            threads.append(thread)
+            threads[i-1].start()
+            #self.iperf_single(hosts = [client, server], udpBw=bw, period=period, port=base_port)
+            base_port += 1
+        for thread in threads:
+            thread.join()
+        #sleep(period)
+        print "test has done"
+    
+    def random_pick( self, _list, probabilities):  
+        x = random.uniform(0,1)  
+        p = None
+        cumulative_probability = 0.0  
+        for item, item_probability in zip(_list, probabilities):  
+            cumulative_probability += item_probability
+            p = item
+            if x < cumulative_probability:break 
+        return p
+    
+
+        print "test has done"
     # BL: We now have four ways to look up nodes
     # This may (should?) be cleaned up in the future.
     def getNodeByName( self, *args ):
@@ -1006,3 +1164,4 @@ class MininetWithControlNet( Mininet ):
                 error( '*** Error: control network test failed\n' )
                 exit( 1 )
         info( '\n' )
+
